@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""
+r"""
 Автоматическая сортировка архивов номенклатуры по категориям 1С УНФ.
 
 Логика:
   1. Читает Структура.xlsx (выгрузка из 1С УНФ), строит соответствие
      код номенклатуры -> путь категории, используя ГРУППИРОВКУ (Outline)
      Excel-листа (тот самый +/- слева от номеров строк).
-  2. Для каждого файла в SOURCE извлекает код из имени (формат НФ-XXXXXXXX).
-  3. Находит категорию по коду, перемещает файл в DEST/<категория>/,
-     создавая подпапки при необходимости.
+  2. Для каждого файла в SOURCE ищет коды НФ-XXXXXXXX в ЛЮБОМ месте имени
+     (например, Тележка (НФ-00034720).rar, Копия НФ-00000001.dwg).
+  3. Находит категорию по коду, перемещает файл в DEST/<категория>/.
+     Если папки категории ещё нет — создаёт её (вместе с родительскими).
   4. Если в целевой папке уже есть файл с таким именем — заменяет его.
-  5. Файлы с неверным форматом имени или без совпадения в прайс-листе
-     НЕ ТРОГАЕТ, только логирует в unprocessed_report.csv.
+  5. Если в имени несколько кодов:
+       - все коды ведут в одну категорию -> файл переносится;
+       - коды из разных категорий (или какого-то кода нет в прайс-листе)
+         -> файл НЕ ТРОГАЕТСЯ, причина пишется в unprocessed_report.csv.
+  6. Файлы без кода в имени, без совпадения в прайс-листе или при ошибке
+     создания папки/переноса НЕ ТРОГАЮТСЯ, только логируются.
 
 Использование:
   python nomenclature_sort.py                 # обычный запуск, реально переносит файлы
@@ -25,7 +30,7 @@
 и файловой системе Windows.
 
 Запускается Планировщиком заданий Windows по расписанию (9:00, 13:00, 16:00).
-Все файлы программы, прайс-лист и логи лежат в C:\\NomenklaturaSort\\.
+Все файлы программы, прайс-лист и логи лежат в C:\NomenklaturaSort\.
 
 Результат каждого запуска (успешно/с ошибками, время выполнения, список
 файлов) пишется в logs\app_run.log — там же дублируется вывод, даже если
@@ -40,6 +45,7 @@ import json
 import argparse
 import platform
 import time
+import traceback
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -52,6 +58,43 @@ except ImportError:
     if sys.stdout is not None:
         print(_msg)
     sys.exit(1)
+
+
+# --- Конфигурация путей ---
+# Программа, прайс-лист и логи — локально, без зависимости от сетевых
+# ссылок и от Hermes agent.
+WORKSPACE = Path(r"C:\NomenklaturaSort")
+PRICE_LIST = WORKSPACE / "PriceList" / "Структура.xlsx"  # обновляйте этот файл вручную
+LOG_DIR = WORKSPACE / "logs"
+
+# Источник и назначение — реальные сетевые папки на KometaNAS.
+SOURCE = Path(r"\\KometaNAS\Производство\Номенклатура\Номенклатурщик")
+DEST = Path(r"\\KometaNAS\Производство\Номенклатура\Готовая номенклатура")
+
+TRANSFER_LOG = LOG_DIR / "transfer_log.csv"
+ISSUES_LOG = LOG_DIR / "unprocessed_report.csv"
+APP_LOG = LOG_DIR / "app_run.log"
+
+# URL webhook-узла n8n. Оставьте пустой строкой, если уведомления пока не нужны.
+# Порт 5678 у вас уже проброшен наружу контейнера n8n (видно в docker ps),
+# поэтому localhost с хоста Windows должен достучаться без проблем.
+N8N_WEBHOOK_URL = "http://localhost:5678/webhook/nomenclature-sort"
+
+# Код в имени файла: НФ-XXXXXXXX в любом месте имени.
+# (?!\d) — чтобы НФ-123456789 (9 цифр) не принимался за код из 8 цифр.
+# Групп в паттерне нет, поэтому findall() возвращает сами коды целиком.
+FILENAME_CODE_PATTERN = re.compile(r"НФ-\d{8}(?!\d)")
+
+# Код в ячейке прайс-листа: только в начале ячейки. Якорь нужен, чтобы
+# отличать строки номенклатуры от заголовков категорий.
+CODE_PATTERN = re.compile(r"^(НФ-\d{8})")
+
+# Столбец с кодом номенклатуры (индекс с 1). ПРОВЕРЬТЕ по вашему файлу
+# через --dump-map перед первым реальным запуском.
+CODE_COLUMN = 2
+# Столбец, из которого брать текст заголовка категории, если строка —
+# заголовок, а не код (обычно название лежит в том же или соседнем столбце).
+NAME_COLUMN = 5
 
 
 def safe_print(*args, file=None, **kwargs):
@@ -93,26 +136,6 @@ def long_path(p: Path) -> str:
         return "\\\\?\\UNC\\" + resolved.lstrip("\\")
     return "\\\\?\\" + resolved
 
-# --- Конфигурация путей ---
-# Программа, прайс-лист и логи — локально, без зависимости от сетевых
-# ссылок и от Hermes agent.
-WORKSPACE = Path(r"C:\NomenklaturaSort")
-PRICE_LIST = WORKSPACE / "PriceList" / "Структура.xlsx"  # обновляйте этот файл вручную
-LOG_DIR = WORKSPACE / "logs"
-
-# Источник и назначение — реальные сетевые папки на KometaNAS.
-SOURCE = Path(r"\\KometaNAS\Производство\Номенклатура\Номенклатурщик")
-DEST = Path(r"\\KometaNAS\Производство\Номенклатура\Готовая номенклатура")
-
-TRANSFER_LOG = LOG_DIR / "transfer_log.csv"
-ISSUES_LOG = LOG_DIR / "unprocessed_report.csv"
-APP_LOG = LOG_DIR / "app_run.log"
-
-# URL webhook-узла n8n. Оставьте пустой строкой, если уведомления пока не нужны.
-# Порт 5678 у вас уже проброшен наружу контейнера n8n (видно в docker ps),
-# поэтому localhost с хоста Windows должен достучаться без проблем.
-N8N_WEBHOOK_URL = "http://localhost:5678/webhook/nomenclature-sort"
-
 
 def notify_n8n(payload: dict) -> None:
     """Отправляет результат в n8n. Не роняет скрипт, если n8n недоступен."""
@@ -127,17 +150,6 @@ def notify_n8n(payload: dict) -> None:
         urllib.request.urlopen(req, timeout=10)
     except (urllib.error.URLError, OSError) as e:
         safe_print(f"Предупреждение: не удалось отправить уведомление в n8n: {e}", file=sys.stderr)
-
-# Единственный допустимый формат имени. Всё остальное (например, УУНФ-)
-# считается ошибкой и не обрабатывается.
-CODE_PATTERN = re.compile(r"^(НФ-\d{8})")
-
-# Столбец с кодом номенклатуры (индекс с 1). ПРОВЕРЬТЕ по вашему файлу
-# через --dump-map перед первым реальным запуском.
-CODE_COLUMN = 2
-# Столбец, из которого брать текст заголовка категории, если строка —
-# заголовок, а не код (обычно название лежит в том же или соседнем столбце).
-NAME_COLUMN = 5
 
 
 def build_category_map(xlsx_path: Path) -> dict[str, str]:
@@ -171,6 +183,30 @@ def build_category_map(xlsx_path: Path) -> dict[str, str]:
                     del stack[lvl]
 
     return mapping
+
+
+def resolve_category(filename: str, category_map: dict[str, str]):
+    """
+    Определяет категорию файла по кодам в его имени.
+    Возвращает (категория, None) при успехе или (None, причина) при отказе.
+    """
+    # dict.fromkeys убирает дубли, сохраняя порядок появления в имени
+    codes = list(dict.fromkeys(FILENAME_CODE_PATTERN.findall(filename)))
+    if not codes:
+        return None, "в имени не найден код НФ-XXXXXXXX"
+
+    missing = [c for c in codes if c not in category_map]
+    if missing:
+        if len(codes) == 1:
+            return None, f"код {missing[0]} не найден в прайс-листе"
+        return None, f"коды не найдены в прайс-листе: {', '.join(missing)}"
+
+    categories = {category_map[c] for c in codes}
+    if len(categories) > 1:
+        details = "; ".join(f"{c} -> {category_map[c]}" for c in codes)
+        return None, f"коды относятся к разным категориям: {details}"
+
+    return categories.pop(), None
 
 
 def main():
@@ -208,35 +244,35 @@ def main():
         if file.name.lower() == "desktop.ini":
             continue  # служебный файл Windows, не номенклатура — молча пропустить
 
-        match = CODE_PATTERN.match(file.name)
-        if not match:
-            issues.append((file.name, "неверный формат имени (ожидался НФ-XXXXXXXX)"))
-            continue
-
-        code = match.group(1)
-        category_path = category_map.get(code)
-
-        if category_path is None:
-            issues.append((file.name, f"код {code} не найден в прайс-листе"))
+        category_path, error = resolve_category(file.name, category_map)
+        if error:
+            issues.append((file.name, error))
             continue
 
         target_dir = DEST / category_path
-        if not Path(long_path(target_dir)).exists():
-            issues.append((file.name, f"папка категории ещё не создана на диске: {category_path}"))
-            continue
-
         target_file = target_dir / file.name
         target_file_lp = long_path(target_file)
         replaced = Path(target_file_lp).exists()
+        action = "ЗАМЕНА" if replaced else "новый"
+        relative_target = str(target_file.relative_to(DEST))
 
         if args.dry_run:
-            transferred.append((file.name, str(target_file.relative_to(DEST)), "ЗАМЕНА" if replaced else "новый"))
+            transferred.append((file.name, relative_target, action))
             continue
 
-        if replaced:
-            Path(target_file_lp).unlink()
-        shutil.move(long_path(file), target_file_lp)
-        transferred.append((file.name, str(target_file.relative_to(DEST)), "ЗАМЕНА" if replaced else "новый"))
+        try:
+            # Создать папку категории (и родительские), если её ещё нет
+            Path(long_path(target_dir)).mkdir(parents=True, exist_ok=True)
+            if replaced:
+                Path(target_file_lp).unlink()
+            shutil.move(long_path(file), target_file_lp)
+        except OSError as e:
+            # Ошибка одного файла (нет прав, файл занят и т.п.) не должна
+            # останавливать обработку остальных
+            issues.append((file.name, f"ошибка переноса в {category_path}: {e}"))
+            continue
+
+        transferred.append((file.name, relative_target, action))
 
     if args.dry_run:
         safe_print(json.dumps({
@@ -301,4 +337,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        # Без этого при --noconsole необработанное исключение исчезает бесследно
+        safe_print("КРИТИЧЕСКАЯ ОШИБКА:\n" + traceback.format_exc())
+        sys.exit(1)
