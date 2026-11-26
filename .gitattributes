@@ -1,0 +1,5 @@
+# Единые переводы строк: убирает предупреждения «LF will be replaced by CRLF» на Windows
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

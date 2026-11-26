@@ -1,0 +1,19 @@
+# Данные и результаты работы. В репозиторий не попадают.
+PriceList/
+reports/
+logs/
+*.xlsx
+*.xls
+*.csv
+*.log
+
+# Локальные настройки (реальные пути)
+kd_local.py
+
+# Служебное
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
