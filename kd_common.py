@@ -17,7 +17,7 @@ WORKSPACE = Path(r"C:\NomenklaturaSort")
 # Выгрузка универсального отчёта УНФ (справочник «Номенклатура» с кодом родителя).
 # Чтобы обновить структуру, положите новую выгрузку на место старой или
 # укажите путь ключом --unf.
-UNF_REPORT = WORKSPACE / "PriceList" / "Структура_1.xlsx"
+UNF_REPORT = WORKSPACE / "PriceList" / "Структура.xlsx"
 # Прайс-лист, по которому работал старый сортировщик. Нужен только для сравнения (--compare).
 OLD_PRICE_LIST = WORKSPACE / "PriceList" / "Структура.xlsx"
 REPORT_DIR = WORKSPACE / "reports"
