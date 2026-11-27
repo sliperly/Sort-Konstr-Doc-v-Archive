@@ -18,8 +18,6 @@ WORKSPACE = Path(r"C:\NomenklaturaSort")
 # Чтобы обновить структуру, положите новую выгрузку на место старой или
 # укажите путь ключом --unf.
 UNF_REPORT = WORKSPACE / "PriceList" / "Структура.xlsx"
-# Прайс-лист, по которому работал старый сортировщик. Нужен только для сравнения (--compare).
-OLD_PRICE_LIST = WORKSPACE / "PriceList" / "Структура.xlsx"
 REPORT_DIR = WORKSPACE / "reports"
 LOG_DIR = WORKSPACE / "logs"
 RUN_LOG = LOG_DIR / "kd_run.log"      # журнал запусков; только дописывается, не перезаписывается

@@ -10,7 +10,7 @@ from pathlib import Path
 import openpyxl
 
 from kd_names import check_name, cluster_by_visual
-from kd_stage1 import build_scope, group_metrics
+from kd_stage1 import build_scope, collect_name_problems, group_metrics, invalid_in_goods
 from kd_unf import UnfFormatError, read_unf
 
 HEADER = ["Номенклатура, Код", None, None, "Не использовать в прайс-листах", None, "Недействительна", "Это группа", "Код"]
@@ -42,7 +42,10 @@ BASE = [
     ("Столы", "НФ-00000001", True, "НФ-00000020", False),
     ("Со светом", "НФ-00000020", True, "НФ-00000021", False),      # то же имя в другой ветке
     ("Мойка, большая, 600х600", "НФ-00000012", False, "НФ-00000100", False),
-    ("Стол светлый", "НФ-00000021", False, "НФ-00000101", True),
+    ("Стол светлый", "НФ-00000021", False, "НФ-00000101", False),
+    ("Стол тёмный", "НФ-00000021", False, "НФ-00000102", True),        # недействительное изделие
+    ("Устаревшее", "НФ-00000001", True, "НФ-00000030", False),
+    ("Старьё", "НФ-00000030", False, "НФ-00000103", True),             # единственное изделие группы недействительно
     ("Работа сварщика", "НФ-00000002", False, "НФ-00000200", False),   # вне «Товары»
     ("Изделие без группы", None, False, "НФ-00000300", False),
 ]
@@ -80,6 +83,30 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(m["direct"]["НФ-00000012"], 1)
         self.assertEqual(m["total"]["НФ-00000010"], 1)   # через две вложенные группы
         self.assertEqual(m["total"]["НФ-00000001"], 2)
+
+    def test_invalid_items_are_ignored(self):
+        tree = read_unf(make_report(BASE))
+        roots, scope = build_scope(tree)
+        self.assertIn("НФ-00000101", scope)
+        self.assertNotIn("НФ-00000102", scope)
+        self.assertNotIn("НФ-00000103", scope)
+        self.assertEqual(invalid_in_goods(tree, roots), 2)
+        m = group_metrics(tree, scope)
+        self.assertEqual(m["total"]["НФ-00000021"], 1)    # недействительный «Стол тёмный» не считается
+        self.assertEqual(m["total"]["НФ-00000030"], 0)    # в группе остались только недействительные
+        self.assertIn("НФ-00000030", scope)               # сама группа остаётся в дереве
+
+    def test_invalid_items_are_not_checked_for_names(self):
+        rows = BASE + [
+            ("Ванна 400x400", "НФ-00000021", False, "НФ-00000110", True),    # недействительная, латинская x
+            ("Ванна 500x500", "НФ-00000021", False, "НФ-00000111", False),   # действующая, латинская x
+        ]
+        tree = read_unf(make_report(rows))
+        roots, scope = build_scope(tree)
+        problems, _stats = collect_name_problems(tree, scope, roots)
+        codes = {r[3] for r in problems}
+        self.assertIn("НФ-00000111", codes)
+        self.assertNotIn("НФ-00000110", codes)
 
     def test_missing_parent_duplicate_and_item_as_parent(self):
         rows = BASE + [
